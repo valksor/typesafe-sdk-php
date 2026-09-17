@@ -1,0 +1,8 @@
+/vendor/
+/.phpunit.cache/
+/.phpunit.result.cache
+/.phpstan.cache/
+
+# Python bytecode from .github/scripts release tooling
+__pycache__/
+*.pyc
