@@ -6,3 +6,6 @@
 # Python bytecode from .github/scripts release tooling
 __pycache__/
 *.pyc
+
+# Libraries do not track composer.lock
+/composer.lock
