@@ -6,7 +6,7 @@ namespace TypeSafe;
 
 final class Client
 {
-    public const VERSION = '0.6.0';
+    public const VERSION = '0.7.0';
     public const DEFAULT_BASE_URL = 'https://api.typesafe.ai';
     public const DEFAULT_MODEL = 'jev-latest';
 
@@ -64,8 +64,15 @@ final class Client
     }
 
     /**
+     * @template T of ResponseModel
+     *
      * @param array<array-key, mixed> $questions
      * @param array<string, mixed> $extraBody
+     * @param class-string<T>|null $responseModel a class implementing {@see ResponseModel} to
+     *     decode the response into; must be a trusted, developer-literal class name, never
+     *     derived from request or user input
+     *
+     * @return ($responseModel is null ? SystemOneResponse : T)
      */
     public function systemOne(
         mixed $state,
@@ -73,8 +80,17 @@ final class Client
         ?string $model = null,
         ?RequestOptions $options = null,
         array $extraBody = [],
-    ): SystemOneResponse {
+        ?string $responseModel = null,
+    ): SystemOneResponse|ResponseModel {
         $normalizedQuestions = $this->validateQuestions($questions);
+        // Validate the response-model class-string before spending the network call. This is a
+        // runtime guard for untyped or dynamic callers: PHPStan proves it from the
+        // class-string<T of ResponseModel> type, but a caller not running PHPStan can still pass a
+        // bad class-string, which would otherwise become a raw \Error at the factory call below.
+        // @phpstan-ignore function.alreadyNarrowedType
+        if ($responseModel !== null && !is_a($responseModel, ResponseModel::class, true)) {
+            throw new TypeSafeException(sprintf('%s is not a class implementing %s.', $responseModel, ResponseModel::class));
+        }
         $body = $extraBody;
         $body['state'] = $state;
         $body['questions'] = $normalizedQuestions;
@@ -84,7 +100,7 @@ final class Client
 
         try {
             $data = self::decodeObject($response->body);
-            $responseModel = self::requiredString($data, 'model');
+            $decodedModel = self::requiredString($data, 'model');
             $rawAnswers = self::requiredObject($data, 'answers');
             $rawUsage = self::requiredObject($data, 'usage');
             $answers = [];
@@ -102,7 +118,21 @@ final class Client
             throw new ResponseValidationError('Invalid System One response: ' . $error->getMessage(), $response, $error);
         }
 
-        return new SystemOneResponse($responseModel, $answers, $usage, $response->meta());
+        $built = new SystemOneResponse($decodedModel, $answers, $usage, $response->meta());
+        if ($responseModel === null) {
+            return $built;
+        }
+        try {
+            return $responseModel::fromSystemOne($built);
+        } catch (\UnexpectedValueException $error) {
+            // Only the documented validation signal is rewrapped; every other exception type
+            // (a genuine bug in the model class) propagates unchanged.
+            throw new ResponseValidationError(
+                sprintf('Invalid System One response for %s: %s', $responseModel, $error->getMessage()),
+                $response,
+                $error,
+            );
+        }
     }
 
     public function listModels(?RequestOptions $options = null): ModelsResponse

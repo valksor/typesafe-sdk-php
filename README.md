@@ -20,6 +20,7 @@ A modern PHP client for the [TypeSafe AI](https://typesafe.ai) System One API.
 
 - Typed `Noul`, `Choice`, and `Score` questions and their answers
 - Single `systemOne()` call with typed answer lookup methods
+- Optional typed response models via a `ResponseModel` factory
 - Model discovery via `$client->models->list()`
 - Environment-based configuration with explicit overrides
 - Configurable per-attempt timeouts and exponential-backoff retries
@@ -68,6 +69,65 @@ all answers in `SystemOneResponse::$answers` and provide typed lookup methods
 (`noul()`, `choice()`, `score()`). List available models with
 `$client->models->list()`.
 
+## Typed response models
+
+Pass a `class-string` implementing `ResponseModel` as `responseModel:` to receive
+a typed model of your own instead of a `SystemOneResponse`. The model's
+`fromSystemOne()` factory pulls the answers it cares about into its own
+properties:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use TypeSafe\Choice;
+use TypeSafe\Client;
+use TypeSafe\Noul;
+use TypeSafe\ResponseModel;
+use TypeSafe\SystemOneResponse;
+
+final readonly class Triage implements ResponseModel
+{
+    public function __construct(
+        public float $spam,
+        public string $category,
+    ) {}
+
+    public static function fromSystemOne(SystemOneResponse $response): static
+    {
+        // Extract null-safely: an omitted or unknown answer returns null.
+        $spam = $response->noul('spam')
+            ?? throw new \UnexpectedValueException('missing answer "spam"');
+        $category = $response->choice('category')
+            ?? throw new \UnexpectedValueException('missing answer "category"');
+
+        return new self(spam: $spam->noul, category: $category->choice);
+    }
+}
+
+$client = new Client();
+$triage = $client->systemOne(
+    state: ['document' => 'I was charged twice.'],
+    questions: [
+        'spam' => new Noul('Is this spam?'),
+        'category' => new Choice('What is this about?', ['billing' => null, 'other' => null]),
+    ],
+    responseModel: Triage::class,
+);
+echo $triage->category;
+```
+
+Throw `\UnexpectedValueException` from `fromSystemOne()` to signal a validation
+failure; the SDK rewraps it as a `ResponseValidationError` carrying the raw
+response. Any other exception type propagates unchanged, so a genuine bug in your
+model class is not misreported as a bad response. Unrecognized answer types are
+ignored, so a future answer type your model does not read causes no failure.
+
+> **Security:** `responseModel:` must be a trusted, developer-literal class name.
+> Never derive it from request or user input — a dynamic class-string would
+> invoke an arbitrary `fromSystemOne()` method (type confusion).
+
 ## Configuration
 
 The `Client` constructor uses named arguments. Explicit values take precedence
@@ -106,8 +166,11 @@ Status codes map to `BadRequestError` (400), `AuthenticationError` (401),
 `PermissionDeniedError` (403), `NotFoundError` (404), `ConflictError` (409),
 `UnprocessableEntityError` (422), `RateLimitError` (429), and
 `InternalServerError` (5xx). Transport-level failures throw `APIConnectionError`
-and `APITimeoutError`. Successful responses with an invalid shape throw
-`ResponseValidationError`.
+and `APITimeoutError`. Successful responses with an invalid shape — and
+`responseModel` factories that report a validation failure — throw
+`ResponseValidationError`, which exposes the raw `$response`. Avoid logging that
+body unredacted in production; it echoes the request `state`, which may contain
+sensitive data.
 
 ## Documentation
 

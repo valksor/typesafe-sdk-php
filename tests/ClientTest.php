@@ -18,6 +18,7 @@ use TypeSafe\ResponseValidationError;
 use TypeSafe\RetryPolicy;
 use TypeSafe\Score;
 use TypeSafe\ScoreAnswer;
+use TypeSafe\SystemOneResponse;
 use TypeSafe\TypeSafeException;
 
 final class ClientTest extends TestCase
@@ -123,5 +124,133 @@ final class ClientTest extends TestCase
 
         $this->expectException(ResponseValidationError::class);
         $client->systemOne('state', ['ok' => new Noul('Is it okay?')], options: new RequestOptions());
+    }
+
+    /**
+     * @param array<string, mixed> $extraAnswers
+     */
+    private static function triageTransport(array $extraAnswers = []): FakeTransport
+    {
+        return new FakeTransport(new HttpResponse(200, [
+            'x-typesafe-request-id' => ['req_model'],
+        ], json_encode([
+            'model' => 'jev-latest',
+            'answers' => [
+                'spam' => ['type' => 'noul', 'noul' => 0.98],
+                'team' => ['type' => 'choice', 'choice' => 'billing', 'confidence' => 0.8, 'probabilities' => ['billing' => 0.9, 'other' => 0.1]],
+                'tone' => ['type' => 'score', 'score' => 1.7, 'confidence' => 0.7, 'legend' => ['0' => 'calm', '1' => 'tense'], 'probabilities' => ['0' => 0.3, '1' => 0.7]],
+                ...$extraAnswers,
+            ],
+            'usage' => ['input_tokens' => 10, 'output_tokens' => 4],
+        ], JSON_THROW_ON_ERROR)));
+    }
+
+    /**
+     * @return array<string, Noul|Choice|Score>
+     */
+    private static function triageQuestions(): array
+    {
+        return [
+            'spam' => new Noul('Is this spam?'),
+            'team' => new Choice('Which team?', ['billing' => null, 'other' => null]),
+            'tone' => new Score('How tense?', ['calm', 'tense']),
+        ];
+    }
+
+    public function testResponseModelReturnsTypedModel(): void
+    {
+        $client = new Client(apiKey: 'test', transport: self::triageTransport());
+
+        $triage = $client->systemOne('state', self::triageQuestions(), responseModel: TicketTriageModel::class);
+
+        self::assertInstanceOf(TicketTriageModel::class, $triage);
+        self::assertSame(0.98, $triage->spam);
+        self::assertSame('billing', $triage->team);
+        self::assertSame(1.7, $triage->tone);
+        self::assertSame('jev-latest', $triage->model);
+        self::assertSame(10, $triage->usage->inputTokens);
+    }
+
+    public function testResponseModelIgnoresUnknownAnswerType(): void
+    {
+        $transport = self::triageTransport(['sentiment' => ['type' => 'vibes', 'value' => 1]]);
+        $client = new Client(apiKey: 'test', transport: $transport);
+
+        $triage = $client->systemOne('state', self::triageQuestions(), responseModel: TicketTriageModel::class);
+
+        self::assertInstanceOf(TicketTriageModel::class, $triage);
+        self::assertSame(0.98, $triage->spam);
+        self::assertSame('billing', $triage->team);
+        self::assertSame(1.7, $triage->tone);
+    }
+
+    public function testResponseModelValidationFailureRaisesValidationError(): void
+    {
+        // Omit "team" so the factory throws \UnexpectedValueException.
+        $transport = new FakeTransport(new HttpResponse(200, [
+            'x-typesafe-request-id' => ['req_invalid'],
+        ], json_encode([
+            'model' => 'jev-latest',
+            'answers' => ['spam' => ['type' => 'noul', 'noul' => 0.98]],
+            'usage' => ['input_tokens' => 1, 'output_tokens' => 1],
+        ], JSON_THROW_ON_ERROR)));
+        $client = new Client(apiKey: 'test', transport: $transport);
+
+        try {
+            $client->systemOne('state', self::triageQuestions(), responseModel: TicketTriageModel::class);
+            self::fail('Expected ResponseValidationError.');
+        } catch (ResponseValidationError $error) {
+            self::assertInstanceOf(\UnexpectedValueException::class, $error->getPrevious());
+            self::assertStringContainsString(TicketTriageModel::class, $error->getMessage());
+            self::assertSame('req_invalid', $error->response->meta()->requestId);
+        }
+    }
+
+    public function testResponseModelGuardRejectsNonImplementingClass(): void
+    {
+        $client = new Client(apiKey: 'test', transport: self::triageTransport());
+
+        $this->expectException(TypeSafeException::class);
+        // Intentionally passing a non-ResponseModel class to exercise the runtime guard.
+        // @phpstan-ignore argument.templateType, argument.type
+        $client->systemOne('state', self::triageQuestions(), responseModel: \stdClass::class);
+    }
+
+    public function testResponseModelGuardRejectsUnknownClassString(): void
+    {
+        $client = new Client(apiKey: 'test', transport: self::triageTransport());
+
+        $this->expectException(TypeSafeException::class);
+        // A non-existent class-string also fails the guard (autoload finds nothing).
+        // @phpstan-ignore argument.templateType, argument.type
+        $client->systemOne('state', self::triageQuestions(), responseModel: '\\TypeSafe\\Tests\\NoSuchResponseModel');
+    }
+
+    public function testResponseModelUncaughtExceptionPropagatesRaw(): void
+    {
+        $client = new Client(apiKey: 'test', transport: self::triageTransport());
+
+        // ThrowingModel throws \LogicException, which is not rewrapped as a validation error.
+        $this->expectException(\LogicException::class);
+        $client->systemOne('state', self::triageQuestions(), responseModel: ThrowingModel::class);
+    }
+
+    public function testResponseModelStillRaisesApiError(): void
+    {
+        $transport = new FakeTransport(new HttpResponse(401, ['x-typesafe-request-id' => ['req_bad']], '{"error":"invalid key"}'));
+        $client = new Client(apiKey: 'test', retry: new RetryPolicy(maxRetries: 0), transport: $transport);
+
+        $this->expectException(AuthenticationError::class);
+        $client->systemOne('state', self::triageQuestions(), responseModel: TicketTriageModel::class);
+    }
+
+    public function testOmittingResponseModelReturnsSystemOneResponse(): void
+    {
+        $client = new Client(apiKey: 'test', transport: self::triageTransport());
+
+        $response = $client->systemOne('state', self::triageQuestions());
+
+        self::assertInstanceOf(SystemOneResponse::class, $response);
+        self::assertSame(0.98, $response->noul('spam')?->noul);
     }
 }
