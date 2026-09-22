@@ -6,7 +6,7 @@ namespace TypeSafe;
 
 final class Client
 {
-    public const VERSION = '0.7.0';
+    public const VERSION = '0.7.1';
     public const DEFAULT_BASE_URL = 'https://api.typesafe.ai';
     public const DEFAULT_MODEL = 'jev-latest';
 
@@ -35,6 +35,13 @@ final class Client
     ) {
         $this->apiKey = self::firstNonBlank($apiKey, getenv('TYPESAFE_API_KEY') ?: null)
             ?? throw new TypeSafeException('No API key was provided. Pass apiKey or set TYPESAFE_API_KEY.');
+        // A trimmed key must be printable ASCII with no whitespace (\x21-\x7e is '!' through '~',
+        // which excludes the space at \x20, control characters, and every non-ASCII byte). This
+        // keeps a malformed credential out of the Authorization header, where whitespace or
+        // control bytes could otherwise inject or split request headers.
+        if (preg_match('/[^\x21-\x7e]/', $this->apiKey) === 1) {
+            throw new TypeSafeException('API key must contain only printable ASCII characters without whitespace.');
+        }
         $resolvedBaseUrl = self::firstNonBlank($baseUrl, getenv('TYPESAFE_BASE_URL') ?: null, self::DEFAULT_BASE_URL)
             ?? throw new TypeSafeException('No base URL could be resolved.');
         $this->baseUrl = rtrim($resolvedBaseUrl, '/');

@@ -145,6 +145,24 @@ backoff. Use `RetryPolicy` for client-wide settings or `RequestOptions` for a
 single call. A custom `Transport` can be injected for framework integration and
 tests.
 
+The API key is validated in the constructor: it is trimmed and must be non-empty
+printable ASCII with no whitespace. A key containing whitespace, control, or
+non-ASCII characters throws a `TypeSafeException`.
+
+### AI gateways
+
+To route requests through an OpenAI-style AI gateway or reverse proxy, point the
+client at the gateway with the `baseUrl:` argument (or the `TYPESAFE_BASE_URL`
+environment variable). The gateway forwards the `Authorization` header and other
+request headers unchanged:
+
+```php
+$client = new Client(
+    apiKey: getenv('TYPESAFE_API_KEY') ?: null,
+    baseUrl: 'https://gateway.example.com/typesafe',
+);
+```
+
 ## Error handling
 
 HTTP failures throw `ApiError` subclasses:

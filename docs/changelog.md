@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.7.1 (2026-09-22)
+
+- Track upstream Python SDK 0.7.1. No wire-contract change.
+- Validate the API key in `Client::__construct()`: the resolved key is trimmed and rejected with
+  a `TypeSafeException` if it is empty or contains whitespace, control characters, or non-ASCII
+  characters. A malformed credential now fails fast at construction instead of being placed into a
+  broken `Authorization` header, where whitespace or control bytes could split request headers.
+- Document pointing the client at an OpenAI-style AI gateway by passing `baseUrl:` (or setting
+  `TYPESAFE_BASE_URL`).
+- Upstream's exception-redaction fix masks credential values that Python's `httpx` can embed in a
+  transport exception's message or chain. PHP's cURL transport reports connection and timeout
+  failures via `curl_error()`, which describes the transport fault and never echoes request header
+  values, so an `APIConnectionError` or `APITimeoutError` from this SDK cannot contain the API key;
+  there is no equivalent to port beyond the early validation above.
+
 ## v0.7.0 (2026-09-19)
 
 - Track upstream Python and JavaScript SDK 0.7.0. No wire-contract change.

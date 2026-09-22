@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace TypeSafe\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use TypeSafe\AuthenticationError;
 use TypeSafe\Choice;
@@ -106,6 +107,33 @@ final class ClientTest extends TestCase
 
         $this->expectException(ConflictError::class);
         $client->models->list();
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function invalidApiKeys(): iterable
+    {
+        yield 'internal space' => ['abc def'];
+        yield 'tab' => ["abc\tdef"];
+        yield 'newline' => ["abc\ndef"];
+        yield 'control char' => ["abc\x01def"];
+        yield 'del char' => ["abc\x7fdef"];
+        yield 'non-ascii' => ['abcdéf'];
+    }
+
+    #[DataProvider('invalidApiKeys')]
+    public function testRejectsInvalidApiKey(string $apiKey): void
+    {
+        $this->expectException(TypeSafeException::class);
+        new Client(apiKey: $apiKey, transport: new FakeTransport());
+    }
+
+    public function testAcceptsPrintableAsciiApiKey(): void
+    {
+        // Surrounding whitespace is trimmed during resolution; the punctuation-rich key is valid.
+        $client = new Client(apiKey: '  sk-Test_123.ABC-xyz+/=  ', transport: new FakeTransport());
+        $this->assertSame('https://api.typesafe.ai', $client->baseUrl());
     }
 
     public function testRejectsInvalidQuestionsBeforeTransport(): void
