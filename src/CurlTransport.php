@@ -6,15 +6,35 @@ namespace TypeSafe;
 
 final class CurlTransport implements Transport
 {
+    /** Most idle connections libcurl keeps cached for reuse. */
+    private const MAX_CONNECTS = 100;
+
+    /** Idle connections older than this are not reused, like upstream's 30 s keepalive expiry. */
+    private const MAX_IDLE_SECONDS = 30;
+
+    private ?\CurlHandle $handle = null;
+
     public function send(string $method, string $url, array $headers, ?string $body, float $timeout): HttpResponse
     {
         if ($method === '') {
             throw new TransportException('HTTP method cannot be empty.');
         }
-        $handle = curl_init($url);
-        if ($handle === false) {
-            throw new TransportException('Unable to initialize cURL.');
+        if ($url === '') {
+            throw new TransportException('HTTP URL cannot be empty.');
         }
+        // One handle per transport: its connection cache survives curl_reset(), so repeated sends
+        // reuse the TLS connection instead of paying a new handshake each time. curl_reset() clears
+        // every option, so nothing from the previous request (method, body, headers) leaks.
+        if ($this->handle === null) {
+            $handle = curl_init();
+            if ($handle === false) {
+                throw new TransportException('Unable to initialize cURL.');
+            }
+            $this->handle = $handle;
+        } else {
+            curl_reset($this->handle);
+        }
+        $handle = $this->handle;
 
         /** @var array<string, list<string>> $responseHeaders */
         $responseHeaders = [];
@@ -23,7 +43,10 @@ final class CurlTransport implements Transport
             $headerLines[] = $name . ': ' . $value;
         }
 
+        curl_setopt($handle, CURLOPT_URL, $url);
         curl_setopt_array($handle, [
+            CURLOPT_MAXCONNECTS => self::MAX_CONNECTS,
+            CURLOPT_MAXAGE_CONN => self::MAX_IDLE_SECONDS,
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $headerLines,
             CURLOPT_RETURNTRANSFER => true,

@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.7.4 (2026-10-13)
+
+- Track upstream Python SDK 0.7.4 (covers 0.7.2–0.7.4).
+- `Client::systemOne()` rejects a `null` state with a `TypeSafeException` ("State is required.")
+  before any request is sent.
+- Reject `Choice` questions, typed or raw, with empty or `null` criteria: `Choice question "<name>" has
+  no criteria; at least one choice is required.`
+- Validate `Noul` questions, typed or raw: criteria that are not an object are rejected
+  (`criteria must be an object`), and so is a question with neither instructions nor a described
+  outcome (`has neither instructions nor criteria; at least one is required`). A criteria map whose
+  `true` and `false` are both `null`, or an empty one, counts as no criteria.
+- Behaviour change: a `Score` question now needs at least one criterion instead of two, matching
+  upstream. An empty criteria list is rejected with `Score question "<name>" has no criteria; at least one
+  score is required.` Validation of typed questions moves from the `Score` constructor to
+  `Score::validate()` so the message can name the question.
+- Non-finite floats anywhere in the request body (state, question instructions and criteria, raw
+  questions, `extraBody`) are sent as the strings `"NaN"`, `"Infinity"` and `"-Infinity"` instead of
+  failing to encode. Finite values encode exactly as before.
+- `CurlTransport` keeps one cURL handle per transport and resets it between requests, so repeated
+  requests reuse the TLS connection instead of opening a new one each time. The connection cache
+  holds up to 100 connections (`CURLOPT_MAXCONNECTS`) and idle connections expire after 30 s
+  (`CURLOPT_MAXAGE_CONN`), matching upstream's pool size and keepalive expiry.
+- Not ported: upstream's truststore TLS lock only guards a Python/AnyIO threading bug and has no PHP
+  equivalent. The `http2` extra is Python packaging; the PHP SDK needs no opt-in, since libcurl
+  negotiates HTTP/2 over TLS on its own when the installed cURL build supports it.
+
 ## v0.7.1 (2026-09-22)
 
 - Track upstream Python SDK 0.7.1. No wire-contract change.

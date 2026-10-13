@@ -32,7 +32,9 @@ final readonly class Choice implements Question
     }
 
     public function validate(string $name): void
-    {}
+    {
+        QuestionRules::choice($name, $this->criteria);
+    }
 
     /** @return array{type: string, instructions: mixed, criteria: array<string, mixed>} */
     public function jsonSerialize(): array

@@ -14,6 +14,7 @@ use TypeSafe\ConflictError;
 use TypeSafe\HttpResponse;
 use TypeSafe\Noul;
 use TypeSafe\NoulAnswer;
+use TypeSafe\NoulCriteria;
 use TypeSafe\RequestOptions;
 use TypeSafe\ResponseValidationError;
 use TypeSafe\RetryPolicy;
@@ -136,13 +137,122 @@ final class ClientTest extends TestCase
         $this->assertSame('https://api.typesafe.ai', $client->baseUrl());
     }
 
-    public function testRejectsInvalidQuestionsBeforeTransport(): void
+    /**
+     * @return iterable<string, array{mixed, array<array-key, mixed>, string}>
+     */
+    public static function invalidRequests(): iterable
+    {
+        yield 'missing state' => [null, ['q' => new Noul('Q?')], 'State is required.'];
+        yield 'empty typed choice' => ['s', ['label' => new Choice('Tone?', [])], 'Choice question "label" has no criteria; at least one choice is required.'];
+        yield 'empty stdClass raw choice' => ['s', ['label' => ['type' => 'choice', 'criteria' => new \stdClass()]], 'Choice question "label" has no criteria; at least one choice is required.'];
+        yield 'empty raw choice' => ['s', ['label' => ['type' => 'choice', 'criteria' => []]], 'Choice question "label" has no criteria; at least one choice is required.'];
+        yield 'null raw choice' => ['s', ['label' => ['type' => 'choice', 'criteria' => null]], 'Choice question "label" has no criteria; at least one choice is required.'];
+        yield 'empty typed score' => ['s', ['rating' => new Score('Rate it', [])], 'Score question "rating" has no criteria; at least one score is required.'];
+        yield 'empty raw score' => ['s', ['rating' => ['type' => 'score', 'criteria' => []]], 'Score question "rating" has no criteria; at least one score is required.'];
+        yield 'null raw score' => ['s', ['rating' => ['type' => 'score', 'criteria' => null]], 'Score question "rating" has no criteria; at least one score is required.'];
+        yield 'bare typed noul' => ['s', ['spam' => new Noul()], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'typed noul with null criteria values' => ['s', ['spam' => new Noul(null, new NoulCriteria())], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'bare raw noul' => ['s', ['spam' => ['type' => 'noul']], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'raw noul null instructions, empty criteria' => ['s', ['spam' => ['type' => 'noul', 'instructions' => null, 'criteria' => []]], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'raw noul null instructions, null criteria values' => ['s', ['spam' => ['type' => 'noul', 'criteria' => ['true' => null, 'false' => null]]], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'raw noul null instructions, null NoulCriteria values' => ['s', ['spam' => ['type' => 'noul', 'criteria' => new NoulCriteria()]], 'Noul question "spam" has neither instructions nor criteria; at least one is required.'];
+        yield 'raw noul scalar criteria' => ['s', ['spam' => ['type' => 'noul', 'instructions' => 'Spam?', 'criteria' => 'spam']], 'Noul question "spam" criteria must be an object.'];
+        yield 'raw noul list criteria' => ['s', ['spam' => ['type' => 'noul', 'instructions' => 'Spam?', 'criteria' => ['spam']]], 'Noul question "spam" criteria must be an object.'];
+    }
+
+    /**
+     * @param array<array-key, mixed> $questions
+     */
+    #[DataProvider('invalidRequests')]
+    public function testRejectsInvalidRequestsBeforeTransport(mixed $state, array $questions, string $message): void
     {
         $transport = new FakeTransport();
         $client = new Client(apiKey: 'test', transport: $transport);
 
-        $this->expectException(TypeSafeException::class);
-        $client->systemOne('state', ['score' => new Score('Rate it', ['only one'])]);
+        try {
+            $client->systemOne($state, $questions);
+            self::fail('Expected TypeSafeException.');
+        } catch (TypeSafeException $error) {
+            self::assertSame($message, $error->getMessage());
+            self::assertSame([], $transport->requests);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, mixed>}>
+     */
+    public static function validQuestions(): iterable
+    {
+        yield 'single-criterion typed score' => [['rating' => new Score('Rate it', ['only one'])]];
+        yield 'single-criterion raw score' => [['rating' => ['type' => 'score', 'criteria' => ['only one']]]];
+        yield 'raw choice with stdClass criteria' => [['label' => ['type' => 'choice', 'criteria' => (object) ['a' => null]]]];
+        yield 'noul with instructions only' => [['spam' => new Noul('Spam?')]];
+        yield 'noul with criteria only' => [['spam' => new Noul(null, new NoulCriteria(true: 'spam'))]];
+        yield 'raw noul with criteria map only' => [['spam' => ['type' => 'noul', 'criteria' => ['false' => 'ham']]]];
+        yield 'raw noul with NoulCriteria only' => [['spam' => ['type' => 'noul', 'criteria' => new NoulCriteria(false: ['ham'])]]];
+        yield 'raw noul with null criteria' => [['spam' => ['type' => 'noul', 'instructions' => 'Spam?', 'criteria' => null]]];
+        yield 'raw noul with empty criteria and instructions' => [['spam' => ['type' => 'noul', 'instructions' => '', 'criteria' => []]]];
+    }
+
+    /**
+     * @param array<array-key, mixed> $questions
+     */
+    #[DataProvider('validQuestions')]
+    public function testAcceptsValidQuestions(array $questions): void
+    {
+        $transport = new FakeTransport(new HttpResponse(200, [], '{"model":"jev-latest","answers":{},"usage":{}}'));
+        $client = new Client(apiKey: 'test', transport: $transport);
+
+        $client->systemOne('state', $questions);
+
+        self::assertCount(1, $transport->requests);
+    }
+
+    public function testNonFiniteFloatsAreSerializedAsStrings(): void
+    {
+        $transport = new FakeTransport(new HttpResponse(200, [], '{"model":"jev-latest","answers":{},"usage":{}}'));
+        $client = new Client(apiKey: 'test', transport: $transport);
+
+        $client->systemOne(
+            state: ['obj' => (object) ['x' => NAN, 'list' => [INF]], 'empty' => new \stdClass(), 'value' => NAN, 'arr' => [1.5, INF, -INF], 'nested' => ['deep' => ['x' => NAN]], 'finite' => 1.5],
+            questions: [
+                'typed' => new Noul(['weight' => INF], new NoulCriteria(true: ['p' => -INF], false: NAN)),
+                'choice' => new Choice('Which?', ['a' => [NAN], 'b' => null]),
+                'score' => new Score('How much?', [INF, 2.5]),
+                'raw' => ['type' => 'noul', 'instructions' => NAN],
+            ],
+            extraBody: ['temperature' => NAN],
+        );
+
+        $body = $transport->requests[0]['body'] ?? '';
+        self::assertStringNotContainsString('INF', $body);
+        self::assertStringNotContainsString('NAN', $body);
+        // A stdClass state still encodes as a JSON object, including when empty.
+        self::assertStringContainsString('"obj":{"x":"NaN","list":["Infinity"]},"empty":{}', $body);
+        self::assertSame([
+            'temperature' => 'NaN',
+            'state' => ['obj' => ['x' => 'NaN', 'list' => ['Infinity']], 'empty' => [], 'value' => 'NaN', 'arr' => [1.5, 'Infinity', '-Infinity'], 'nested' => ['deep' => ['x' => 'NaN']], 'finite' => 1.5],
+            'questions' => [
+                'typed' => ['type' => 'noul', 'instructions' => ['weight' => 'Infinity'], 'criteria' => ['true' => ['p' => '-Infinity'], 'false' => 'NaN']],
+                'choice' => ['type' => 'choice', 'instructions' => 'Which?', 'criteria' => ['a' => ['NaN'], 'b' => null]],
+                'score' => ['type' => 'score', 'instructions' => 'How much?', 'criteria' => ['Infinity', 2.5]],
+                'raw' => ['type' => 'noul', 'instructions' => 'NaN'],
+            ],
+            'model' => 'jev-latest',
+        ], json_decode($body, true, flags: JSON_THROW_ON_ERROR));
+    }
+
+    public function testFiniteBodyEncodesExactlyAsBefore(): void
+    {
+        $transport = new FakeTransport(new HttpResponse(200, [], '{"model":"jev-latest","answers":{},"usage":{}}'));
+        $client = new Client(apiKey: 'test', transport: $transport);
+
+        $client->systemOne(['a' => 1, 'b' => 0.1, 'c' => [], 'd' => 'é/'], ['q' => new Choice('Q?', ['x' => null])]);
+
+        self::assertSame(
+            '{"state":{"a":1,"b":0.1,"c":[],"d":"\u00e9\/"},"questions":{"q":{"type":"choice","instructions":"Q?","criteria":{"x":null}}},"model":"jev-latest"}',
+            $transport->requests[0]['body'],
+        );
     }
 
     public function testMalformedSuccessRaisesValidationError(): void

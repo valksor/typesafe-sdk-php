@@ -17,9 +17,6 @@ final readonly class Score implements Question
         if (!array_is_list($criteria)) {
             throw new TypeSafeException('Score criteria must be a list indexed from zero.');
         }
-        if (count($criteria) < 2) {
-            throw new TypeSafeException('Score questions require at least two criteria.');
-        }
         $this->criteria = $criteria;
     }
 
@@ -29,7 +26,9 @@ final readonly class Score implements Question
     }
 
     public function validate(string $name): void
-    {}
+    {
+        QuestionRules::score($name, $this->criteria);
+    }
 
     /** @return array{type: string, instructions: mixed, criteria: list<mixed>} */
     public function jsonSerialize(): array

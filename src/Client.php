@@ -6,7 +6,7 @@ namespace TypeSafe;
 
 final class Client
 {
-    public const VERSION = '0.7.1';
+    public const VERSION = '0.7.4';
     public const DEFAULT_BASE_URL = 'https://api.typesafe.ai';
     public const DEFAULT_MODEL = 'jev-latest';
 
@@ -89,6 +89,9 @@ final class Client
         array $extraBody = [],
         ?string $responseModel = null,
     ): SystemOneResponse|ResponseModel {
+        if ($state === null) {
+            throw new TypeSafeException('State is required.');
+        }
         $normalizedQuestions = $this->validateQuestions($questions);
         // Validate the response-model class-string before spending the network call. This is a
         // runtime guard for untyped or dynamic callers: PHPStan proves it from the
@@ -186,7 +189,7 @@ final class Client
         $encodedBody = null;
         if ($body !== null) {
             try {
-                $encodedBody = json_encode($body, JSON_THROW_ON_ERROR);
+                $encodedBody = json_encode(self::stringifyNonFinite($body), JSON_THROW_ON_ERROR);
             } catch (\JsonException $error) {
                 throw new TypeSafeException('The request body could not be encoded as JSON.', 0, $error);
             }
@@ -311,9 +314,12 @@ final class Client
             if (in_array($question['type'], ['choice', 'score'], true) && !array_key_exists('criteria', $question)) {
                 throw new TypeSafeException(sprintf('Question "%s" requires criteria.', $name));
             }
-            if ($question['type'] === 'score' && (!is_array($question['criteria']) || count($question['criteria']) < 2)) {
-                throw new TypeSafeException(sprintf('Score question "%s" requires at least two criteria.', $name));
-            }
+            match ($question['type']) {
+                'choice' => QuestionRules::choice($name, $question['criteria']),
+                'score' => QuestionRules::score($name, $question['criteria']),
+                'noul' => QuestionRules::noul($name, $question['instructions'] ?? null, $question['criteria'] ?? null),
+                default => null,
+            };
             $normalized[$name] = self::stringMap($question, sprintf('question %s', $name));
         }
         return $normalized;
@@ -521,6 +527,30 @@ final class Client
             $result[$key] = $value;
         }
         return $result;
+    }
+
+    /**
+     * JSON has no NaN/Infinity tokens, so non-finite floats are sent as the strings "NaN",
+     * "Infinity" and "-Infinity" instead of failing to encode. Questions and criteria objects are
+     * expanded through jsonSerialize() and decoded JSON objects (stdClass) are mapped property by
+     * property, so nested values are covered too.
+     */
+    private static function stringifyNonFinite(mixed $value): mixed
+    {
+        if (is_float($value) && !is_finite($value)) {
+            return is_nan($value) ? 'NaN' : ($value > 0 ? 'Infinity' : '-Infinity');
+        }
+        if ($value instanceof \JsonSerializable) {
+            $value = $value->jsonSerialize();
+        }
+        if ($value instanceof \stdClass) {
+            return (object) array_map(self::stringifyNonFinite(...), get_object_vars($value));
+        }
+        if (is_array($value)) {
+            return array_map(self::stringifyNonFinite(...), $value);
+        }
+
+        return $value;
     }
 
     /** @param array<string, string> $headers */

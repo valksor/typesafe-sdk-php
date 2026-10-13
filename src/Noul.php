@@ -16,7 +16,10 @@ final readonly class Noul implements Question
         return 'noul';
     }
 
-    public function validate(string $name): void {}
+    public function validate(string $name): void
+    {
+        QuestionRules::noul($name, $this->instructions, $this->criteria);
+    }
 
     /** @return array<string, mixed> */
     public function jsonSerialize(): array
