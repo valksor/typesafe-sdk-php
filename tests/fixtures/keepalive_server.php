@@ -14,6 +14,7 @@ while (($client = stream_socket_accept($server, -1)) !== false) {
     while (($head = stream_get_line($client, 65536, "\r\n\r\n")) !== false) {
         preg_match('/^(\S+) /', $head, $method);
         preg_match('/^content-type: *(.*)$/mi', $head, $type);
+        preg_match('/^expect:/mi', $head, $expect);
         $length = preg_match('/^content-length: *(\d+)/mi', $head, $matches) === 1 ? (int) $matches[1] : 0;
         $body = $length > 0 ? (string) stream_get_contents($client, $length) : '';
         $payload = json_encode([
@@ -21,6 +22,7 @@ while (($client = stream_socket_accept($server, -1)) !== false) {
             'method' => $method[1] ?? '',
             'body' => $body,
             'content_type' => isset($type[1]) ? trim($type[1]) : null,
+            'expect' => $expect !== [],
         ]);
         fwrite($client, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen((string) $payload) . "\r\nConnection: keep-alive\r\n\r\n" . $payload);
     }

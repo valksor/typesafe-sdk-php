@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.7.5 (2026-10-18)
+
+- Track upstream Python SDK 0.7.5.
+- `Box` questions and `BoxAnswer`/`BoxCoordinates` answers, with `SystemOneResponse::box()`. A box answer
+  must carry `box` with all four edges and a `confidence` key (which may be `null`); anything else is a
+  `ResponseValidationError`.
+- Image assets: `Image::fromBytes()`, `Image::fromFile()` and `Image::fromBase64()` (padding is required).
+  An image can be placed anywhere in the state, question instructions or criteria, passed by alias in the
+  new last parameter `systemOne(..., assets: [...])`, or referenced in text by its unique reference (cast
+  the image to a string) while attached with `Client::attachAssets()`. Images are read once, on first
+  use, and uploaded as `multipart/form-data` parts. Image input is an experimental API feature that
+  currently needs the `TypeSafe-Danger-Zone-Images: true` header.
+- zstd request compression: bodies of 1 KiB or more, multipart included, are compressed once per request
+  and sent with `Content-Encoding: zstd`. The new last constructor argument `compression:` takes `'zstd'`,
+  `false` or `null`; `null` (the default) uses zstd when ext-zstd is loaded.
+- Behaviour change: with ext-zstd loaded, request bodies of 1 KiB or more are now zstd-compressed by
+  default. Non-official APIs, proxies and self-hosted endpoints may not support compressed request
+  bodies; pass `compression: false` to opt out. Without ext-zstd nothing changes, and `compression: 'zstd'`
+  throws a `TypeSafeException`. If a body mixes confidential state with attacker-controlled text, opt out
+  to avoid a compression length side channel.
+- Not ported: Pillow images (`Image.from_pil`) and buffer-protocol input have no PHP equivalent, and
+  async asset resolution is Python-specific. Log truncation is not applicable: the PHP SDK never logs
+  request or response bodies.
+
 ## v0.7.4 (2026-10-13)
 
 - Track upstream Python SDK 0.7.4 (covers 0.7.2–0.7.4).

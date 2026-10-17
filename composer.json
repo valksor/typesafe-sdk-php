@@ -12,6 +12,9 @@
         "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^13.3"
     },
+    "suggest": {
+        "ext-zstd": "Compresses request bodies of 1 KiB or more with zstd by default"
+    },
     "autoload": {
         "psr-4": {
             "TypeSafe\\": "src/"

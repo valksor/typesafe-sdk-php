@@ -6,7 +6,7 @@ namespace TypeSafe;
 
 final class Client
 {
-    public const VERSION = '0.7.4';
+    public const VERSION = '0.7.5';
     public const DEFAULT_BASE_URL = 'https://api.typesafe.ai';
     public const DEFAULT_MODEL = 'jev-latest';
 
@@ -18,11 +18,19 @@ final class Client
     /** @var array<string, string> */
     private readonly array $headers;
     private readonly Transport $transport;
+    private readonly ?string $compression;
+
+    /** @var array<string, Image> Images attached with attachAssets(), by reference. */
+    private array $attached = [];
+    /** @var array<string, int> How many active attachAssets() calls hold each attached image. */
+    private array $holds = [];
 
     public readonly Models $models;
 
     /**
      * @param array<string, string> $headers
+     * @param string|false|null $compression 'zstd' to compress request bodies of 1 KiB or more (requires
+     *     ext-zstd), false to send them uncompressed, or null (default) for zstd when ext-zstd is loaded
      */
     public function __construct(
         ?string $apiKey = null,
@@ -32,6 +40,7 @@ final class Client
         array $headers = [],
         ?Transport $transport = null,
         ?string $baseUrl = null,
+        string|false|null $compression = null,
     ) {
         $this->apiKey = self::firstNonBlank($apiKey, getenv('TYPESAFE_API_KEY') ?: null)
             ?? throw new TypeSafeException('No API key was provided. Pass apiKey or set TYPESAFE_API_KEY.');
@@ -57,6 +66,7 @@ final class Client
         }
         $this->headers = $headers;
         $this->transport = $transport ?? new CurlTransport();
+        $this->compression = Compression::resolve($compression);
         $this->models = new Models($this);
     }
 
@@ -75,6 +85,9 @@ final class Client
      *
      * @param array<array-key, mixed> $questions
      * @param array<string, mixed> $extraBody
+     * @param array<array-key, mixed>|null $assets {@see Image} objects by alias. The API replaces an alias
+     *     wherever it appears as or inside a string, so aliases must be unique placeholders such as
+     *     "<photo>" or a UUID, never plain words
      * @param class-string<T>|null $responseModel a class implementing {@see ResponseModel} to
      *     decode the response into; must be a trusted, developer-literal class name, never
      *     derived from request or user input
@@ -88,6 +101,7 @@ final class Client
         ?RequestOptions $options = null,
         array $extraBody = [],
         ?string $responseModel = null,
+        ?array $assets = null,
     ): SystemOneResponse|ResponseModel {
         if ($state === null) {
             throw new TypeSafeException('State is required.');
@@ -106,7 +120,8 @@ final class Client
         $body['questions'] = $normalizedQuestions;
         $body['model'] = self::firstNonBlank($model, $this->defaultModel)
             ?? throw new TypeSafeException('No model could be resolved.');
-        $response = $this->request('POST', '/v1/systemone', $body, $options);
+        [$encodedBody, $bodyHeaders] = $this->encodeSystemOne($body, $assets, array_key_exists('assets', $extraBody));
+        $response = $this->request('POST', '/v1/systemone', $encodedBody, $bodyHeaders, $options);
 
         try {
             $data = self::decodeObject($response->body);
@@ -145,9 +160,50 @@ final class Client
         }
     }
 
+    /**
+     * Attaches images for the duration of $fn, so any text sent meanwhile may contain their references
+     * (cast the image to a string). Only attached images whose reference appears in the request are
+     * sent. Attachments are client-wide, shared by every call made meanwhile: pass `assets` per call
+     * instead when one client serves several tenants. Overlapping attachments of an image keep it
+     * attached until the last one ends.
+     *
+     * @template T
+     *
+     * @param Image|array<array-key, mixed> $assets
+     * @param callable(): T $fn
+     *
+     * @return T
+     *
+     * @throws TypeSafeException An attached value is not an Image.
+     */
+    public function attachAssets(Image|array $assets, callable $fn): mixed
+    {
+        $images = $assets instanceof Image ? [$assets] : array_values($assets);
+        foreach ($images as $image) {
+            if (!$image instanceof Image) {
+                throw new TypeSafeException(sprintf('Attached value of type %s must be an asset.', get_debug_type($image)));
+            }
+        }
+        foreach ($images as $image) {
+            $reference = $image->reference();
+            $this->attached[$reference] = $image;
+            $this->holds[$reference] = ($this->holds[$reference] ?? 0) + 1;
+        }
+        try {
+            return $fn();
+        } finally {
+            foreach ($images as $image) {
+                $reference = $image->reference();
+                if (--$this->holds[$reference] === 0) {
+                    unset($this->holds[$reference], $this->attached[$reference]);
+                }
+            }
+        }
+    }
+
     public function listModels(?RequestOptions $options = null): ModelsResponse
     {
-        $response = $this->request('GET', '/v1/models', null, $options);
+        $response = $this->request('GET', '/v1/models', null, [], $options);
         try {
             $data = self::decodeObject($response->body);
             $rawModels = self::requiredList($data, 'models');
@@ -170,9 +226,100 @@ final class Client
     }
 
     /**
-     * @param array<string, mixed>|null $body
+     * Encodes a System One request body. Images placed in the body encode as their alias (when passed in
+     * `assets`) or their reference. Images that are passed, attached, or placed in the body are known by
+     * reference: the ones whose reference appears in the encoded JSON are sent too. With nothing to send
+     * the body is plain JSON, otherwise `multipart/form-data` with the JSON as the `request` part
+     * followed by one `asset-N` part per asset name. An `assets` key in `extraBody` replaces all of it.
+     *
+     * @param array<string, mixed> $body
+     * @param array<array-key, mixed>|null $assets
+     *
+     * @return array{string, array<string, string>} The encoded body and its headers.
      */
-    private function request(string $method, string $path, ?array $body, ?RequestOptions $options): HttpResponse
+    private function encodeSystemOne(array $body, ?array $assets, bool $overridden): array
+    {
+        $passed = [];
+        $aliases = [];
+        foreach ($assets ?? [] as $key => $asset) {
+            $name = (string) $key;
+            if ($asset instanceof Image) {
+                $aliases[spl_object_id($asset)] = $name;
+            }
+            if ($overridden) {
+                continue;
+            }
+            if (trim($name) === '') {
+                throw new TypeSafeException('Asset aliases must be non-empty strings.');
+            }
+            if (!$asset instanceof Image) {
+                throw new TypeSafeException(sprintf('Asset "%s" must be an asset.', $name));
+            }
+            $passed[] = [$name, $asset];
+        }
+
+        // The encoding context spans the whole encode path, as jsonSerialize() runs in both steps.
+        return Image::collecting($aliases, function (ImageReferences $references) use ($body, $passed, $overridden): array {
+            $prepared = array_map(self::stringifyNonFinite(...), $body);
+            $json = self::encodeJson($prepared);
+            $jsonHeaders = ['Content-Type' => 'application/json'];
+            if ($overridden) {
+                return [$json, $jsonHeaders];
+            }
+
+            $known = $this->attached;
+            foreach ($passed as [, $image]) {
+                $known[$image->reference()] = $image;
+            }
+            $known += $references->found;
+            $pending = $passed;
+            $names = [];
+            foreach ($passed as [$name]) {
+                $names[$name] = true;
+            }
+            // References are JSON-safe ASCII, so one scan of the encoded body finds them in every string.
+            if ($known !== [] && preg_match_all('/<image:[0-9a-f]{32}>/', $json, $matches) > 0) {
+                foreach ($matches[0] as $reference) {
+                    if (isset($known[$reference]) && !isset($names[$reference])) {
+                        $names[$reference] = true;
+                        $pending[] = [$reference, $known[$reference]];
+                    }
+                }
+            }
+            if ($pending === []) {
+                // The API rejects an empty `assets`, so it's left out.
+                return [$json, $jsonHeaders];
+            }
+
+            // An image under several names is read once, but sent once per name: the API requires each
+            // part to be claimed by exactly one asset.
+            $entries = new \stdClass();
+            $parts = [];
+            foreach ($pending as $index => [$name, $image]) {
+                try {
+                    $resolved = $image->resolve();
+                } catch (TypeSafeException $error) {
+                    throw new TypeSafeException(sprintf('Asset "%s": %s', $name, $error->getMessage()), 0, $error);
+                }
+                $part = 'asset-' . $index;
+                $entries->{$name} = ['type' => 'image', 'part' => $part];
+                $parts[] = ['name' => $part, 'contentType' => $resolved['contentType'], 'content' => $resolved['data'], 'filename' => $part];
+            }
+            $prepared['assets'] = $entries;
+            [$contentType, $multipart] = Multipart::encode([
+                ['name' => 'request', 'contentType' => 'application/json', 'content' => self::encodeJson($prepared), 'filename' => null],
+                ...$parts,
+            ]);
+
+            // The empty Expect header stops cURL from waiting for a 100-continue on large bodies.
+            return [$multipart, ['Content-Type' => $contentType, 'Expect' => '']];
+        });
+    }
+
+    /**
+     * @param array<string, string> $bodyHeaders Headers describing $body, such as its Content-Type.
+     */
+    private function request(string $method, string $path, ?string $body, array $bodyHeaders, ?RequestOptions $options): HttpResponse
     {
         $options ??= new RequestOptions();
         $policy = $options->retry ?? $this->retry;
@@ -186,14 +333,14 @@ final class Client
             'X-TypeSafe-Runtime' => sprintf('php/%s %s', PHP_VERSION, PHP_OS_FAMILY),
         ]);
         self::removeHeader($headers, 'X-TypeSafe-Retry-Count');
-        $encodedBody = null;
-        if ($body !== null) {
-            try {
-                $encodedBody = json_encode(self::stringifyNonFinite($body), JSON_THROW_ON_ERROR);
-            } catch (\JsonException $error) {
-                throw new TypeSafeException('The request body could not be encoded as JSON.', 0, $error);
+        $encodedBody = $body;
+        if ($encodedBody !== null) {
+            $headers = self::mergeHeaders($headers, $bodyHeaders);
+            // Compressed once, so every attempt sends the same bytes.
+            if ($this->compression !== null && strlen($encodedBody) >= Compression::MIN_BODY_LENGTH) {
+                $encodedBody = Compression::compress($encodedBody);
+                $headers = self::mergeHeaders($headers, ['Content-Encoding' => $this->compression]);
             }
-            $headers = self::mergeHeaders($headers, ['Content-Type' => 'application/json']);
         }
 
         for ($attempt = 0; ; ++$attempt) {
@@ -342,6 +489,10 @@ final class Client
                 self::integerKeyMap(self::requiredMap($data, 'legend')),
                 self::integerFloatMap(self::requiredMap($data, 'probabilities')),
             ),
+            'box' => new BoxAnswer(
+                self::boxCoordinates(self::stringMap(self::requiredMap($data, 'box'), 'box')),
+                self::requiredNullableFloat($data, 'confidence'),
+            ),
             default => new UnknownAnswer($type, $data),
         };
     }
@@ -384,6 +535,28 @@ final class Client
             throw new \UnexpectedValueException(sprintf('missing or invalid %s', $key));
         }
         return (float) $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private static function requiredNullableFloat(array $data, string $key): ?float
+    {
+        // Unlike an optional value, a null one must be sent explicitly.
+        if (!array_key_exists($key, $data)) {
+            throw new \UnexpectedValueException(sprintf('missing %s', $key));
+        }
+
+        return $data[$key] === null ? null : self::requiredFloat($data, $key);
+    }
+
+    /** @param array<string, mixed> $box */
+    private static function boxCoordinates(array $box): BoxCoordinates
+    {
+        return new BoxCoordinates(
+            self::requiredFloat($box, 'top'),
+            self::requiredFloat($box, 'bottom'),
+            self::requiredFloat($box, 'left'),
+            self::requiredFloat($box, 'right'),
+        );
     }
 
     /**
@@ -527,6 +700,15 @@ final class Client
             $result[$key] = $value;
         }
         return $result;
+    }
+
+    private static function encodeJson(mixed $value): string
+    {
+        try {
+            return json_encode($value, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $error) {
+            throw new TypeSafeException('The request body could not be encoded as JSON.', 0, $error);
+        }
     }
 
     /**

@@ -40,6 +40,20 @@ final class CurlTransportTest extends TestCase
         self::assertSame($one['connection'], $two['connection']);
     }
 
+    public function testEmptyHeaderValueSuppressesCurlsExpectHeader(): void
+    {
+        $transport = new CurlTransport();
+        $url = sprintf('http://127.0.0.1:%d/', $this->startServer());
+
+        // A large body otherwise makes cURL send `Expect: 100-continue` and wait for the server's answer.
+        $with = $transport->send('POST', $url, ['Content-Type' => 'application/json', 'Expect' => ''], str_repeat('x', 2_000_000), 5.0);
+
+        $echo = Json::object($with->body);
+        self::assertFalse($echo['expect']);
+        self::assertIsString($echo['body']);
+        self::assertSame(2_000_000, strlen($echo['body']));
+    }
+
     private function startServer(): int
     {
         if (!function_exists('proc_open')) {

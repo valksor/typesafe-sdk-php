@@ -18,12 +18,14 @@ A modern PHP client for the [TypeSafe AI](https://typesafe.ai) System One API.
 
 ## Features
 
-- Typed `Noul`, `Choice`, and `Score` questions and their answers
+- Typed `Noul`, `Choice`, `Score`, and `Box` questions and their answers
+- Image inputs, passed, placed in content, or referenced in text
 - Single `systemOne()` call with typed answer lookup methods
 - Optional typed response models via a `ResponseModel` factory
 - Model discovery via `$client->models->list()`
 - Environment-based configuration with explicit overrides
 - Configurable per-attempt timeouts and exponential-backoff retries
+- zstd request-body compression when `ext-zstd` is loaded
 - Request IDs and raw response metadata on every call
 - Injectable `Transport` (default cURL) for framework integration and tests
 - Status-specific typed exceptions
@@ -35,7 +37,9 @@ A modern PHP client for the [TypeSafe AI](https://typesafe.ai) System One API.
 composer require valksor/typesafe-sdk-php
 ```
 
-Requires PHP 8.4 or newer with the `curl` and `json` extensions.
+Requires PHP 8.4 or newer with the `curl` and `json` extensions. The optional `zstd`
+extension ([`ext-zstd`](https://pecl.php.net/package/zstd)) compresses large request
+bodies; see [Compression](#compression).
 
 ## Quick start
 
@@ -128,6 +132,110 @@ ignored, so a future answer type your model does not read causes no failure.
 > Never derive it from request or user input — a dynamic class-string would
 > invoke an arbitrary `fromSystemOne()` method (type confusion).
 
+## Images
+
+Image input is an experimental API feature that currently needs the
+`TypeSafe-Danger-Zone-Images: true` header, and it requires a vision-language
+model. Pass the header with the `headers:` constructor argument:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use TypeSafe\Client;
+use TypeSafe\Image;
+use TypeSafe\Noul;
+
+$client = new Client(headers: ['TypeSafe-Danger-Zone-Images' => 'true']);
+
+$response = $client->systemOne(
+    state: ['Here is the returned item:', Image::fromFile('photos/product.png')],
+    questions: ['damaged' => new Noul('Is the item damaged?')],
+);
+```
+
+Create an `Image` with `Image::fromBytes()` (the bytes of an image file),
+`Image::fromFile()` (a path, read when the image is first used), or
+`Image::fromBase64()` (base64 text, such as an upload; whitespace is ignored and
+padding is required, and invalid text throws a `TypeSafeException`). An image is
+read once, on first use, and every request that sends the same `Image` object
+reuses it. PNG and JPEG are recognized by their signature; other formats are sent
+as generic binary data and left for the API to accept or reject. Pillow images and
+the Python buffer protocol have no PHP equivalent.
+
+An image can be:
+
+- **Placed** anywhere in the state, or in a question's instructions or criteria
+  (including raw question arrays). It is sent as an upload, and its unique
+  reference replaces it.
+- **Passed** by alias in `assets:`, an array of `Image` objects. The API replaces
+  an alias wherever it appears **as or inside** any string, so aliases must be
+  unique placeholders such as `<photo>` or a UUID, never plain words. An image
+  placed in the content that is also passed is sent under its alias only. An image
+  under several aliases is sent once per alias.
+- **Referenced in text** by its reference: cast the image to a string (`"{$photo}"`).
+  The image is sent when it is attached with `attachAssets()`, passed, or placed
+  elsewhere in the request. Text that merely looks like a reference stays text.
+
+```php
+$photo = Image::fromFile('photos/product.png');
+
+$response = $client->attachAssets($photo, fn () => $client->systemOne(
+    state: "The customer says {$photo} arrived scratched.",
+    questions: ['damaged' => new Noul("Is the item in {$photo} damaged?")],
+));
+```
+
+Attached images are client-wide: every call the client makes meanwhile shares them,
+and overlapping attachments of an image keep it attached until the last one ends.
+If one client serves several tenants, pass `assets:` per call instead. A request
+with an `assets` key in `extraBody` is sent as given, and no image is read.
+
+Images are uploaded to the TypeSafe API as `multipart/form-data` parts, and they
+are held whole in memory. They are sent as-is, including EXIF metadata such as
+GPS location, so strip metadata you don't need before sending. `Image::fromFile()`
+is a local file read: never pass an untrusted path (URL wrappers are rejected).
+
+## Box
+
+A `Box` question locates what its instructions describe in the request's image.
+The answer is a `BoxAnswer`: the box's `top`, `bottom`, `left`, and `right` edges
+as fractions of the image's height and width (0 to 1), and a `confidence` that is
+`null` when the model does not provide one. Box questions currently need the
+`jev-preview` model: the API rejects them on the default model.
+
+```php
+use TypeSafe\Box;
+
+$response = $client->systemOne(
+    state: Image::fromFile('photos/dog.jpg'),
+    questions: ['dog' => new Box('The dog')],
+    model: 'jev-preview',
+);
+
+$dog = $response->box('dog');
+echo $dog?->box->left, ' ', $dog?->box->top, ' ', $dog?->confidence ?? 'n/a';
+```
+
+## Compression
+
+With `ext-zstd` loaded, request bodies of 1 KiB or more (multipart uploads
+included) are compressed once per request with zstd and sent with
+`Content-Encoding: zstd`; retries send the same bytes. Smaller bodies and
+requests without a body are never compressed.
+
+The `compression:` constructor argument controls this: `null` (the default) uses
+zstd when `ext-zstd` is loaded and sends plain bodies otherwise, `'zstd'` requires
+the extension and throws a `TypeSafeException` without it, and `false` never
+compresses.
+
+> **Behaviour change in 0.7.5:** with `ext-zstd` loaded, large bodies are now
+> compressed by default. The TypeSafe API accepts them, but non-official APIs,
+> proxies, and self-hosted endpoints may not. Pass `compression: false` to opt
+> out. If a body mixes confidential state with attacker-controlled text, opt out
+> too, to avoid a compression length side channel.
+
 ## Configuration
 
 The `Client` constructor uses named arguments. Explicit values take precedence
@@ -202,11 +310,17 @@ composer analyse     # PHPStan (max level)
 composer lint        # php -l syntax check
 ```
 
-Live integration tests are opt-in and read-only (they exercise `GET /v1/models`):
+Live integration tests are opt-in. They call `GET /v1/models` and `POST /v1/systemone`
+(with and without compression):
 
 ```sh
 TYPESAFE_RUN_LIVE_TESTS=1 TYPESAFE_API_KEY=... composer test
 ```
+
+The live image tests also need `TYPESAFE_LIVE_IMAGES=1`, and an API that accepts
+the experimental image header.
+
+Tests that need the real `ext-zstd` are skipped when it is not loaded; CI installs it.
 
 ## Releases
 

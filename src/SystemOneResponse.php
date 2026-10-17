@@ -31,4 +31,10 @@ final readonly class SystemOneResponse
         $answer = $this->answers[$name] ?? null;
         return $answer instanceof ScoreAnswer ? $answer : null;
     }
+
+    public function box(string $name): ?BoxAnswer
+    {
+        $answer = $this->answers[$name] ?? null;
+        return $answer instanceof BoxAnswer ? $answer : null;
+    }
 }
